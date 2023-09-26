@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>渲染器2</title>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <script src="https://unpkg.com/@vue/reactivity@3.0.5/dist/reactivity.global.js"></script>
+    <script>
+      const { effect, ref } = VueReactivity // 上面的 global IIFE 暴露的全名
+
+      const Text = Symbol()
+      const Comment = Symbol()
+      const Fragment = Symbol()
+
+      function shouldSetAsProps(el, key, value) {
+        if (key === 'form' && el.tagName === 'INPUT') {
+          return false
+        }
+        return key in el
+      }
+
+      function createRenderer(options) {
+        const {
+          createElement,
+          setElementText,
+          insert,
+          patchProps,
+          createText,
+          createComment,
+        } = options
+
+        function mountElement(vnode, container, anchor) {
+          // 建立 vnode 和 真实的 dom 之间的关系
+          const el = (vnode.el = createElement(vnode.type))
+          if (typeof vnode.children === 'string') {
+            setElementText(el, vnode.children)
+          } else if (Array.isArray(vnode.children)) {
+            vnode.children.forEach((vnode) => {
+              // 调用的是 patch 函数
+              patch(null, vnode, el)
+            })
+          }
+
+          if (vnode.props) {
+            for (const key in vnode.props) {
+              // 封装成 API
+              patchProps(el, key, null, vnode.props[key])
+            }
+          }
+
+          insert(el, container, anchor)
+        }
+
+        function unmount(vnode) {
+          if (vnode.type === Fragment) {
+            vnode.children.forEach((c) => unmount(c))
+            return
+          }
+          const el = vnode.el
+          const parent = el.parentNode
+          if (parent) parent.removeChild(el)
+        }
+
+        function patchKeyedChildren(n1, n2, container) {
+          if (Array.isArray(n1.children)) {
+            const oldChildren = n1.children
+            const newChildren = n2.children
+            const oldLen = oldChildren.length
+            const newLen = newChildren.length
+
+            let oldStartIdx = 0
+            let oldEndIdx = oldLen - 1
+            let newStartIdx = 0
+            let newEndIdx = newLen - 1
+
+            let oldStartVNode = oldChildren[oldStartIdx]
+            let oldEndVNode = oldChildren[oldEndIdx]
+            let newStartVNode = newChildren[newStartIdx]
+            let newEndVNode = newChildren[newEndIdx]
+
+            // 双端 diff 算法
+            while (oldStartIdx <= oldEndIdx && newStartIdx <= newEndIdx) {
+              if (oldStartVNode === undefined) {
+                oldStartVNode = oldChildren[++oldStartIdx]
+              } else if (oldEndVNode === undefined) {
+                oldEndVNode = oldChildren[--oldEndIdx]
+              } else if (oldStartVNode.key === newStartVNode.key) {
+                patch(oldStartVNode, newStartVNode, container)
+
+                oldStartVNode = oldChildren[++oldStartIdx]
+                newStartVNode = newChildren[++newStartIdx]
+              } else if (oldEndVNode.key == newEndVNode.key) {
+                patch(oldEndVNode, newEndVNode, container)
+
+                oldEndVNode = oldChildren[--oldEndIdx]
+                newEndVNode = newChildren[--newEndIdx]
+              } else if (oldStartVNode.key === newEndVNode.key) {
+                patch(oldStartVNode, newEndVNode, container)
+                // 说明新的vnode中，当前这个 vnode 跑到最后去了
+                const anchor = oldEndVNode.el.nextSibling
+                insert(oldStartVNode.el, container, anchor)
+
+                oldStartVNode = oldChildren[++oldStartIdx]
+                newEndVNode = newChildren[--newEndIdx]
+              } else if (oldEndVNode.key === newStartVNode.key) {
+                patch(oldEndVNode, newStartVNode, container) // 内容都是要更新滴
+                // 说明在新的 vnode 中，当前这个vnode跑到第一个去了，所以我们需要把老的中真实的DOM也移动到第一个前面去
+                const anchor = oldStartVNode.el
+                insert(oldEndVNode.el, container, anchor)
+
+                oldEndVNode = oldChildren[--oldEndIdx]
+                newStartVNode = newChildren[++newStartIdx]
+              } else {
+                const idxInOld = oldChildren.findIndex(
+                  (vnode) => vnode && vnode.key === newStartVNode.key
+                )
+                if (idxInOld > 0) {
+                  const vnodeToMove = oldChildren[idxInOld]
+                  patch(vnodeToMove, newStartVNode, container)
+
+                  const anchor = oldStartVNode.el
+                  insert(vnodeToMove.el, container, anchor)
+
+                  oldChildren[idxInOld] = undefined
+                } else {
+                  // 新增的，头部就放在现在的头部就行
+                  const anchor = oldStartVNode.el
+                  patch(null, newStartVNode, container, anchor)
+                }
+                newStartVNode = newChildren[++newStartIdx]
+              }
+            }
+            // 因为我们是先比较新头新尾，再比较老头老尾的。在指向同一个节点的情况下，老尾会被减1
+            // 此时新的队列中仍然有符合循环条件的，说明新的队列元素增多了，没有一一对应
+            if (oldEndIdx < oldStartIdx && newStartIdx <= newEndIdx) {
+              for (let i = newStartIdx; i <= newEndIdx; i++) {
+                patch(null, newChildren[i], container, oldStartVNode.el)
+              }
+            } else if (oldStartIdx <= oldEndIdx && newEndIdx < newStartIdx) {
+              // 如果老的还没遍历完成，新的却已经没了，那么剩下老的就是要被卸载的
+              for (let i = oldStartIdx; i <= oldEndIdx; i++) {
+                unmount(oldChildren[i])
+              }
+            }
+          } else {
+            setElementText(container, '')
+            n2.children.forEach((c) => patch(null, c, container))
+          }
+        }
+
+        function patchChildren(n1, n2, container) {
+          if (typeof n2.children === 'string') {
+            if (Array.isArray(n1.children)) {
+              n1.children.forEach((c) => unmount(c))
+            }
+            setElementText(container, n2.children)
+          } else if (Array.isArray(n2.children)) {
+            patchKeyedChildren(n1, n2, container)
+          } else {
+            if (Array.isArray(n1.children)) {
+              n1.children.forEach((c) => unmount(c))
+            } else if (typeof n1.children === 'string') {
+              setElementText(container, '')
+            }
+          }
+        }
+
+        function patchElement(n1, n2) {
+          // 获取到原有的真实 dom
+          const el = (n2.el = n1.el)
+          // 更新 props
+          const oldProps = n1.props
+          const newProps = n2.props
+          // 更新
+          for (const key in newProps) {
+            if (newProps[key] !== oldProps[key]) {
+              patchProps(el, key, oldProps[key], newProps[key])
+            }
+          }
+          // 删除
+          for (const key in oldProps) {
+            if (!(key in newProps)) {
+              patchProps(el, key, oldProps[key], null)
+            }
+          }
+          patchChildren(n1, n2, el)
+        }
+
+        /**
+         * 补上新元素，不管是第一次挂载还是更新
+         * @param n1 旧vnode
+         * @param n2 新vnode
+         * @param container 容器
+         */
+        function patch(n1, n2, container, anchor = null) {
+          if (n1 && n1.type !== n2.type) {
+            unmount(n1)
+            n1 = null
+          }
+          // 更新一般 HTML
+          if (typeof n2.type === 'string') {
+            if (!n1) {
+              mountElement(n2, container, anchor)
+            } else {
+              patchElement(n1, n2)
+            }
+          } else if (n2.type === Text) {
+            if (!n1) {
+              const el = (n2.el = createText(n2.children))
+              insert(el, container)
+            } else {
+              const el = (n2.el = n1.el)
+              setText(el, n2.children)
+            }
+          } else if (n2.type === Comment) {
+            if (!n1) {
+              const el = (n2.el = createComment(n2.children))
+              insert(el, container)
+            } else {
+              const el = (n2.el = n1.el)
+              setText(el, n2.children)
+            }
+          } else if (n2.type === Fragment) {
+            if (!n1) {
+              // 如果没有旧的节点，直接把新的节点放上去
+              n2.children.forEach((c) => patch(null, c, container))
+            } else {
+              // 如果有，只处理 children 即可
+              patchChildren(n1, n2, container)
+            }
+          } else if (typeof n2.type === 'object') {
+            // todo: 处理组件
+          }
+        }
+
+        function render(vnode, container) {
+          if (vnode) {
+            // 如果新的vnode存在则传和老的的一起打补丁
+            patch(container._vnode, vnode, container)
+          } else {
+            // 否则就是卸载操作，清除掉 dom
+            if (container._vnode) {
+              unmount(container._vnode)
+            }
+          }
+          // 记录下渲染过的 vnode
+          container._vnode = vnode
+        }
+        return {
+          render,
+        }
+      }
+
+      const renderer = createRenderer({
+        createElement(tag) {
+          return document.createElement(tag)
+        },
+        setElementText(el, text) {
+          el.textContent = text
+        },
+        insert(el, parent, anchor = null) {
+          // 将 el 插入到 anchor 元素前
+          parent.insertBefore(el, anchor)
+        },
+        createText(text) {
+          return document.createTextNode(text)
+        },
+        createComment(comment) {
+          return document.createComment(comment)
+        },
+        setText(el, text) {
+          el.nodeValue = text
+        },
+        patchProps(el, key, preValue, nextValue) {
+          if (/^on/.test(key)) {
+            const name = key.slice(2).toLowerCase()
+            const invokers = el._vei || (el._vei = {})
+            let invoker = invokers[key]
+            if (nextValue) {
+              if (!invoker) {
+                invoker = el._vei[key] = (e) => {
+                  // 如果触发时间
+                  if (e.timeStamp < invoker.attached) return
+                  // 处理一个事件绑定多个方法
+                  if (Array.isArray(invoker.value)) {
+                    invoker.value.forEach((fn) => fn(e))
+                  } else {
+                    invoker.value(e)
+                  }
+                }
+                invoker.value = nextValue
+                invoker.attached = performance.now()
+                el.addEventListener(name, invoker)
+              } else {
+                invoker.value = nextValue
+              }
+            } else if (invoker) {
+              el.removeEventListener(name, invoker)
+            }
+          } else if (key === 'class') {
+            el.className = nextValue || ''
+          } else if (shouldSetAsProps(el, key, nextValue)) {
+            // DOM Properties
+            const type = typeof el[key] // 获取原有的数据类型
+            if (type === 'boolean' && value === '') {
+              el[key] = true
+            } else {
+              el[key] = nextValue
+            }
+          } else {
+            el.setAttribute(key, nextValue)
+          }
+        },
+      })
+
+      const vnode = {
+        type: 'div',
+        children: [
+          { type: 'p', children: 'hello', key: 1 },
+          { type: 'p', children: '2', key: 2 },
+          { type: 'p', children: '3', key: 3 },
+        ],
+      }
+
+      const newVnode = {
+        type: 'div',
+        children: [
+          { type: 'p', children: '4', key: 4 },
+          { type: 'p', children: 'world', key: 1 },
+          { type: 'p', children: '3', key: 3 },
+        ],
+      }
+
+      renderer.render(vnode, document.querySelector('#app'))
+
+      setTimeout(() => {
+        renderer.render(newVnode, document.querySelector('#app'))
+      }, 1000)
+    </script>
+  </body>
+</html>

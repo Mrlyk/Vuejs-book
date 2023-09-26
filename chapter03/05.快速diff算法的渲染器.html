@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>渲染器2</title>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <script src="https://unpkg.com/@vue/reactivity@3.0.5/dist/reactivity.global.js"></script>
+    <script>
+      // 获取最长递增子序列
+      function getSequence(arr) {
+        const shallowCloneArr = arr.slice()
+        const result = [0]
+        let i, j, u, v, c
+        const len = arr.length
+        for (i = 0; i < len; i++) {
+          const arrI = arr[i]
+          if (arrI !== 0) {
+            j = result[result.length - 1]
+            if (arr[j] < arrI) {
+              shallowCloneArr[i] = j
+              result.push(i)
+              continue
+            }
+            u = 0
+            v = result.length - 1
+            while (u < v) {
+              // 去除小数部分
+              c = ((u + v) / 2) | 0
+              if (arr[result[c]] < arrI) {
+                u = c + 1
+              } else {
+                v = c
+              }
+            }
+            if (arrI < arr[result[u]]) {
+              if (u > 0) {
+                shallowCloneArr[i] = result[u - 1]
+              }
+              result[u] = i
+            }
+          }
+        }
+        u = result.length
+        v = result[u - 1]
+        while (u-- > 0) {
+          result[u] = v // 整体前移了一格？
+          v = shallowCloneArr[v]
+        }
+        return result
+      }
+
+      const { effect, ref } = VueReactivity // 上面的 global IIFE 暴露的全名
+
+      const Text = Symbol()
+      const Comment = Symbol()
+      const Fragment = Symbol()
+
+      function shouldSetAsProps(el, key, value) {
+        if (key === 'form' && el.tagName === 'INPUT') {
+          return false
+        }
+        return key in el
+      }
+
+      function createRenderer(options) {
+        const {
+          createElement,
+          setElementText,
+          insert,
+          patchProps,
+          createText,
+          createComment,
+        } = options
+
+        function mountElement(vnode, container, anchor) {
+          // 建立 vnode 和 真实的 dom 之间的关系
+          const el = (vnode.el = createElement(vnode.type))
+          if (typeof vnode.children === 'string') {
+            setElementText(el, vnode.children)
+          } else if (Array.isArray(vnode.children)) {
+            vnode.children.forEach((vnode) => {
+              // 调用的是 patch 函数
+              patch(null, vnode, el)
+            })
+          }
+
+          if (vnode.props) {
+            for (const key in vnode.props) {
+              // 封装成 API
+              patchProps(el, key, null, vnode.props[key])
+            }
+          }
+
+          insert(el, container, anchor)
+        }
+
+        function unmount(vnode) {
+          if (vnode.type === Fragment) {
+            vnode.children.forEach((c) => unmount(c))
+            return
+          }
+          const el = vnode.el
+          const parent = el.parentNode
+          if (parent) parent.removeChild(el)
+        }
+
+        function patchKeyedChildren(n1, n2, container) {
+          if (Array.isArray(n1.children)) {
+            const oldChildren = n1.children
+            const newChildren = n2.children
+            const oldLen = oldChildren.length
+            const newLen = newChildren.length
+
+            let j = 0
+            let oldVNode = oldChildren[j]
+            let newVNode = newChildren[j]
+
+            // 预处理相同的前置节点和后置节点
+            // 先从前往后更新所有一致的
+            while (oldVNode && newVNode && oldVNode.key === newVNode.key) {
+              patch(oldVNode, newVNode, container)
+              j++
+              oldVNode = oldChildren[j]
+              newVNode = newChildren[j]
+            }
+
+            // 再从后往前找一致的
+            let oldEnd = oldLen - 1
+            let newEnd = newLen - 1
+            oldVNode = oldChildren[oldEnd]
+            newVNode = newChildren[newEnd]
+
+            while (oldVNode && newVNode && oldVNode.key === newVNode.key) {
+              patch(oldVNode, newVNode, container)
+              oldVNode = oldChildren[--oldEnd]
+              newVNode = newChildren[--newEnd]
+            }
+
+            // 如果老的都遍历完了，但是新的还没有，说明有新增的
+            if (j > oldEnd && j <= newEnd) {
+              const anchorIdx = newEnd + 1
+              const anchor =
+                anchorIdx < newLen ? newChildren[anchorIdx].el : null
+              while (j <= newEnd) {
+                patch(null, newChildren[j], container, anchor)
+                j++
+              }
+            } else if (j > newEnd && j <= oldEnd) {
+              // 同理如果新的都遍历完了，但是老的还没有，说明有删除的
+              while (j <= oldEnd) {
+                unmount(oldChildren[j])
+                j++
+              }
+            } else {
+              // 否则说明还有节点没处理过
+              const count = newEnd - j + 1 // 没处理过的节点数量
+              const source = new Array(count) // 建立一个数组来存储索引
+              source.fill(-1) // 先全部用 -1 填充，假设都是新增的
+
+              const newStart = j
+              const oldStart = j
+
+              let moved = false
+              let pos = 0
+              let patched = 0
+              const keyIndex = {}
+              // 遍历新的虚拟子节点建立映射关系， key 在新数组中的位置关系映射
+              for (let i = newStart; i <= newEnd; i++) {
+                const key = newChildren[i].key
+                keyIndex[key] = i
+              }
+              // 处理老的子节点中没处理的数据
+              for (let i = oldStart; i <= oldEnd; i++) {
+                oldVNode = oldChildren[i]
+                // 边界情况：如果更新过的老节点的数量不超过总的要更新的数量才更新
+                // 比如老的有4、6、2、7、8、9新的2、4，那么更新了老的 2 之后，剩余的7、8、9也不用管直接卸载即可
+                if (patched <= count) {
+                  const key = oldVNode.key
+                  const k = keyIndex[key] // 在新数组中的位置
+                  if (typeof k !== 'undefined') {
+                    newVNode = newChildren[k]
+                    patch(oldVNode, newVNode)
+                    patched++ // 记录更新过的老的子节点中的数量
+                    source[k - newStart] = i
+
+                    // 和简单diff算法一样，如果比当前最大索引值小说明需要移动
+                    if (k < pos) {
+                      moved = true
+                    } else {
+                      pos = k
+                    }
+                  } else {
+                    unmount(oldVNode)
+                  }
+                } else {
+                  unmount(oldVNode)
+                }
+              }
+              // if (moved) {
+              // [3, -1, 1]
+              const seq = getSequence(source) // 获取最长递增子序列(值为索引)
+              let s = seq.length - 1
+              let i = count - 1
+              for (i; i >= 0; i--) {
+                if (source[i] === -1) {
+                  // 新增
+                  const pos = i + newStart
+                  const newVNode = newChildren[pos]
+                  const nextPos = pos + 1
+                  const anchor =
+                    nextPos < newChildren.length
+                      ? newChildren[nextPos].el
+                      : null
+                  patch(null, newVNode, container, anchor)
+                } else if (moved) {
+                  if (i !== seq[s]) {
+                    // 移动
+                    const pos = i + newStart
+                    const newVNode = newChildren[pos]
+                    const nextPos = pos + 1
+                    const anchor =
+                      nextPos < newChildren.length
+                        ? newChildren[nextPos].el
+                        : null
+                    insert(newVNode.el, container, anchor)
+                  } else {
+                    // 相同时说明位置关系一致，不用移动，游标上移即可
+                    s--
+                  }
+                }
+              }
+              // }
+            }
+
+            // 要移动的情况
+          } else {
+            setElementText(container, '')
+            n2.children.forEach((c) => patch(null, c, container))
+          }
+        }
+
+        function patchChildren(n1, n2, container) {
+          if (typeof n2.children === 'string') {
+            if (Array.isArray(n1.children)) {
+              n1.children.forEach((c) => unmount(c))
+            }
+            setElementText(container, n2.children)
+          } else if (Array.isArray(n2.children)) {
+            patchKeyedChildren(n1, n2, container)
+          } else {
+            if (Array.isArray(n1.children)) {
+              n1.children.forEach((c) => unmount(c))
+            } else if (typeof n1.children === 'string') {
+              setElementText(container, '')
+            }
+          }
+        }
+
+        function patchElement(n1, n2) {
+          // 获取到原有的真实 dom
+          const el = (n2.el = n1.el)
+          // 更新 props
+          const oldProps = n1.props
+          const newProps = n2.props
+          // 更新
+          for (const key in newProps) {
+            if (newProps[key] !== oldProps[key]) {
+              patchProps(el, key, oldProps[key], newProps[key])
+            }
+          }
+          // 删除
+          for (const key in oldProps) {
+            if (!(key in newProps)) {
+              patchProps(el, key, oldProps[key], null)
+            }
+          }
+          patchChildren(n1, n2, el)
+        }
+
+        /**
+         * 补上新元素，不管是第一次挂载还是更新
+         * @param n1 旧vnode
+         * @param n2 新vnode
+         * @param container 容器
+         */
+        function patch(n1, n2, container, anchor = null) {
+          if (n1 && n1.type !== n2.type) {
+            unmount(n1)
+            n1 = null
+          }
+          // 更新一般 HTML
+          if (typeof n2.type === 'string') {
+            if (!n1) {
+              mountElement(n2, container, anchor)
+            } else {
+              patchElement(n1, n2)
+            }
+          } else if (n2.type === Text) {
+            if (!n1) {
+              const el = (n2.el = createText(n2.children))
+              insert(el, container)
+            } else {
+              const el = (n2.el = n1.el)
+              setText(el, n2.children)
+            }
+          } else if (n2.type === Comment) {
+            if (!n1) {
+              const el = (n2.el = createComment(n2.children))
+              insert(el, container)
+            } else {
+              const el = (n2.el = n1.el)
+              setText(el, n2.children)
+            }
+          } else if (n2.type === Fragment) {
+            if (!n1) {
+              // 如果没有旧的节点，直接把新的节点放上去
+              n2.children.forEach((c) => patch(null, c, container))
+            } else {
+              // 如果有，只处理 children 即可
+              patchChildren(n1, n2, container)
+            }
+          } else if (typeof n2.type === 'object') {
+            // todo: 处理组件
+          }
+        }
+
+        function render(vnode, container) {
+          if (vnode) {
+            // 如果新的vnode存在则传和老的的一起打补丁
+            patch(container._vnode, vnode, container)
+          } else {
+            // 否则就是卸载操作，清除掉 dom
+            if (container._vnode) {
+              unmount(container._vnode)
+            }
+          }
+          // 记录下渲染过的 vnode
+          container._vnode = vnode
+        }
+        return {
+          render,
+        }
+      }
+
+      const renderer = createRenderer({
+        createElement(tag) {
+          return document.createElement(tag)
+        },
+        setElementText(el, text) {
+          el.textContent = text
+        },
+        insert(el, parent, anchor = null) {
+          // 将 el 插入到 anchor 元素前
+          parent.insertBefore(el, anchor)
+        },
+        createText(text) {
+          return document.createTextNode(text)
+        },
+        createComment(comment) {
+          return document.createComment(comment)
+        },
+        setText(el, text) {
+          el.nodeValue = text
+        },
+        patchProps(el, key, preValue, nextValue) {
+          if (/^on/.test(key)) {
+            const name = key.slice(2).toLowerCase()
+            const invokers = el._vei || (el._vei = {})
+            let invoker = invokers[key]
+            if (nextValue) {
+              if (!invoker) {
+                invoker = el._vei[key] = (e) => {
+                  // 如果触发时间
+                  if (e.timeStamp < invoker.attached) return
+                  // 处理一个事件绑定多个方法
+                  if (Array.isArray(invoker.value)) {
+                    invoker.value.forEach((fn) => fn(e))
+                  } else {
+                    invoker.value(e)
+                  }
+                }
+                invoker.value = nextValue
+                invoker.attached = performance.now()
+                el.addEventListener(name, invoker)
+              } else {
+                invoker.value = nextValue
+              }
+            } else if (invoker) {
+              el.removeEventListener(name, invoker)
+            }
+          } else if (key === 'class') {
+            el.className = nextValue || ''
+          } else if (shouldSetAsProps(el, key, nextValue)) {
+            // DOM Properties
+            const type = typeof el[key] // 获取原有的数据类型
+            if (type === 'boolean' && value === '') {
+              el[key] = true
+            } else {
+              el[key] = nextValue
+            }
+          } else {
+            el.setAttribute(key, nextValue)
+          }
+        },
+      })
+
+      const vnode = {
+        type: 'div',
+        children: [
+          { type: 'p', children: 'hello', key: 1 },
+          { type: 'p', children: '4', key: 4 }, // <-----j
+          { type: 'p', children: '6', key: 6 },
+          { type: 'p', children: '2', key: 2 }, // <-----oldEnd
+          { type: 'p', children: '3', key: 3 },
+        ],
+      }
+
+      const newVnode = {
+        type: 'div',
+        children: [
+          { type: 'p', children: 'world', key: 1 },
+          { type: 'p', children: '2', key: 2 }, //<------j 1
+          { type: 'p', children: '5', key: 5 },
+          { type: 'p', children: '4', key: 4 }, // <------newEnd 3
+          { type: 'p', children: '3', key: 3 },
+        ],
+      }
+      renderer.render(vnode, document.querySelector('#app'))
+
+      setTimeout(() => {
+        renderer.render(newVnode, document.querySelector('#app'))
+      }, 1000)
+    </script>
+  </body>
+</html>
